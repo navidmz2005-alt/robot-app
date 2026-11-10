@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  #m { height: 68vh; }
+  button { padding: 11px 12px; font-size: 15px; margin: 2px; }
+  #s { padding: 8px; font-size: 15px; }
+  .off { color: #c0392b; font-weight: bold; }
+</style>
+</head>
+<body>
+<div id="m"></div>
+<div>
+  <button onclick="go()">GO</button>
+  <button onclick="send('LOADED')">LOADED</button>
+  <button onclick="send('STOP')">STOP</button>
+  <button onclick="send('UNLOCK')">UNLOCK</button>
+  <button onclick="locate()">LOCATE</button>
+  <button onclick="location.reload()">RESET</button>
+</div>
+<div id="s">Waiting for the robot...</div>
+
+<script>
+// must match the ESP32 code
+var T_CMD = "robot-x9k2q7/cmd";
+var T_STAT = "robot-x9k2q7/status";
+
+var map = L.map('m').setView([23.58, 58.4], 13);
+L.tileLayer('https://tile.opentopomap.org/{z}/{x}/{y}.png', {
+  attribution: '© OpenStreetMap contributors, © OpenTopoMap',
+  maxZoom: 17
+}).addTo(map);
+var pick = null, drop = null, robot = null, first = true;
+var trail = L.polyline([], {color: 'red', weight: 3}).addTo(map);
+var lastPos = null, lastLive = 0, stale = true, curState = '-', curDist = '-';
+
+map.on('click', function (e) {
+  if (!pick) pick = L.marker(e.latlng).addTo(map).bindTooltip('Pickup', {permanent: true});
+  else if (!drop) drop = L.marker(e.latlng).addTo(map).bindTooltip('Drop', {permanent: true});
+});
+
+var c = mqtt.connect('wss://broker.hivemq.com:8884/mqtt');
+c.on('connect', function () { c.subscribe(T_STAT); });
+c.on('message', function (t, m, packet) {
+  var p = m.toString().split(',');
+  curState = p[0];
+  curDist = p[3];
+  stale = !!packet.retain;            // retained = last known, not live
+  if (!stale) lastLive = Date.now();
+  var lat = parseFloat(p[1]), lon = parseFloat(p[2]);
+  if (lat !== 0 && !isNaN(lat)) {
+    lastPos = [lat, lon];
+    if (!robot) robot = L.circleMarker(lastPos, {radius: 8, color: 'red'}).addTo(map);
+    robot.setLatLng(lastPos);
+    if (!stale) trail.addLatLng(lastPos);
+    if (first) { map.setView(lastPos, 17); first = false; }
+  }
+});
+
+setInterval(function () {
+  var el = document.getElementById('s');
+  if (stale || !lastLive) {
+    el.innerHTML = '<span class="off">Last known position (robot offline?)</span>  ' + curState;
+  } else {
+    var age = Math.round((Date.now() - lastLive) / 1000);
+    var txt = curState + '  |  distance ' + curDist + ' m  |  updated ' + age + ' s ago';
+    el.innerHTML = age > 20 ? '<span class="off">' + txt + ' (no signal?)</span>' : txt;
+  }
+}, 1000);
+
+function locate() { if (lastPos) map.setView(lastPos, 18); }
+function send(msg) { c.publish(T_CMD, msg); }
+function go() {
+  if (!pick || !drop) return;
+  var a = pick.getLatLng(), b = drop.getLatLng();
+  send('GO,' + a.lat.toFixed(6) + ',' + a.lng.toFixed(6) + ',' + b.lat.toFixed(6) + ',' + b.lng.toFixed(6));
+}
+</script>
+</body>
+</html>
